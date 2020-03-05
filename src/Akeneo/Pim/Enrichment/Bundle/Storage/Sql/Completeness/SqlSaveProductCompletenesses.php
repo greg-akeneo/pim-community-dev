@@ -85,7 +85,7 @@ final class SqlSaveProductCompletenesses implements SaveProductCompletenesses
                             (locale_id, channel_id, product_id, missing_count, required_count)
                         VALUES
                             $placeholders
-        SQL;
+SQL;
 
             $stmt = $this->connection->prepare($insert);
 
@@ -164,29 +164,37 @@ final class SqlSaveProductCompletenesses implements SaveProductCompletenesses
     }
 
     /**
-     * We don't catch any exception if an error occurs, because it's the last attempt to insert the data by locking the
-     * completeness table.
-     * Do note that it locks also the table in READ mode for all the foreign keys (locale, channel, product).
-     * It means that you can't insert data in the product table also (just read).
+     * We don't catch any exception if an error occurs, because it's the last
+     * attempt to insert the data by locking the completeness table.  Do note
+     * that it locks also the table in READ mode for all the foreign keys
+     * (locale, channel, product). It means that you can't insert data in the
+     * product table also (just read). This is why we disable the foreign key
+     * checks during this transaction to ovoid locking the product table.
      */
     private function executeWithLockOnTable(callable $function): void
     {
         $this->logger->warning('Locking the whole completeness table to persist the completeness, as it fails after trying 5 times to insert data due to deadlocks.');
 
-        $value = $this->connection->executeQuery('SELECT @@autocommit')->fetch();
+        $value = $this->connection->executeQuery('SELECT @@autocommit, @@foreign_key_checks')->fetch();
         if (!isset($value['@@autocommit']) && ((int) $value['@@autocommit'] !== 1 || (int) $value['@@autocommit'] !== 0)) {
-            throw new \LogicException('Error when getting autocommit parameter from Mysql.');
+            throw new \RuntimeException('Error when getting autocommit parameter from Mysql.');
+        }
+        if (!isset($value['@@foreign_key_checks']) && ((int) $value['@@foreign_key_checks'] !== 1 || (int) $value['@@foreign_key_checks'] !== 0)) {
+            throw new \RuntimeException('Error when getting foreign_key_checks parameter from Mysql.');
         }
 
         $formerAutocommitValue = (int) $value['@@autocommit'];
+        $formerForeignKeyChecksValue = (int) $value['@@foreign_key_checks'];
         try {
             $this->connection->executeQuery('SET autocommit=0');
+            $this->connection->executeQuery('SET foreign_key_checks=0');
             $this->connection->executeQuery('LOCK TABLES pim_catalog_completeness WRITE');
             $function();
             $this->connection->executeQuery('COMMIT');
             $this->connection->executeQuery('UNLOCK TABLES');
         } finally {
             $this->connection->executeQuery(sprintf('SET autocommit=%d', $formerAutocommitValue));
+            $this->connection->executeQuery(sprintf('SET foreign_key_checks=%d', $formerForeignKeyChecksValue));
         }
     }
 }
